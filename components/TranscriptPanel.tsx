@@ -46,6 +46,24 @@ import { isTypingTarget } from "@/lib/keyboard";
 import { useI18n } from "./I18nProvider";
 import { localizeRuntimeMessage } from "@/lib/i18n";
 
+function normalizeSearchToken(text: string) {
+  return text
+    .toLocaleLowerCase()
+    .replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "")
+    .trim();
+}
+
+function parseSearchTokens(query: string) {
+  return Array.from(
+    new Set(
+      query
+        .split(/[\n,]/)
+        .map((token) => normalizeSearchToken(token))
+        .filter((token) => token.length > 0)
+    )
+  );
+}
+
 const WordSpan = memo(function WordSpan({
   word,
   cutOut,
@@ -129,6 +147,7 @@ export default function TranscriptPanel() {
   const correctWords = useEditorStore((s) => s.correctWords);
   const importWords = useEditorStore((s) => s.importWords);
   const removeSceneBoundary = useEditorStore((s) => s.removeSceneBoundary);
+  const setSelectedWords = useEditorStore((s) => s.setSelectedWords);
   const selectedWordIds = useEditorStore((s) => s.selectedWordIds);
   const playing = useEditorStore((s) => s.playing);
   const activeWordId = useEditorStore((s) => findActiveWordId(s.words, s.currentTime));
@@ -158,6 +177,7 @@ export default function TranscriptPanel() {
   const importInputRef = useRef<HTMLInputElement>(null);
   const [correcting, setCorrecting] = useState<{ ids: number[] } | null>(null);
   const [correctText, setCorrectText] = useState("");
+  const [wordQuery, setWordQuery] = useState("");
   const [assigningSpeaker, setAssigningSpeaker] = useState<{
     ids: number[];
   } | null>(null);
@@ -220,6 +240,17 @@ export default function TranscriptPanel() {
     });
 
   const turns = useMemo(() => groupWordsBySpeaker(words), [words]);
+  const searchTokens = useMemo(() => parseSearchTokens(wordQuery), [wordQuery]);
+  const matchedWordIds = useMemo(() => {
+    if (searchTokens.length === 0) return [];
+    const tokenSet = new Set(searchTokens);
+    const ids: number[] = [];
+    for (const word of words) {
+      if (cutOutIds.has(word.id)) continue;
+      if (tokenSet.has(normalizeSearchToken(word.text))) ids.push(word.id);
+    }
+    return ids;
+  }, [searchTokens, words, cutOutIds]);
 
   const deletedCount = useMemo(() => cutOutIds.size, [cutOutIds]);
   const handleImportTranscript = useCallback(
@@ -314,6 +345,16 @@ export default function TranscriptPanel() {
     closeCorrect();
   }, [correcting, correctText, correctWords, closeCorrect]);
 
+  const selectAllMatches = useCallback(() => {
+    setSelectedWords(matchedWordIds);
+  }, [matchedWordIds, setSelectedWords]);
+
+  const removeAllMatches = useCallback(() => {
+    if (matchedWordIds.length === 0) return;
+    deleteWords(matchedWordIds);
+    setSelectedWords([]);
+  }, [matchedWordIds, deleteWords, setSelectedWords]);
+
   // Close the correction popover when clicking outside of it.
   const popoverRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -365,6 +406,40 @@ export default function TranscriptPanel() {
           {t("transcript.header")}
         </span>
         <div className="ml-auto flex items-center gap-2">
+          {status === "ready" && words.length > 0 && (
+            <div className="hidden items-center gap-1.5 sm:flex">
+              <input
+                value={wordQuery}
+                onChange={(e) => setWordQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") selectAllMatches();
+                }}
+                placeholder={t("transcript.findWordPlaceholder")}
+                className="h-7 w-28 rounded-lg border border-zinc-300 bg-zinc-50 px-2 text-xs text-zinc-800 outline-none focus:border-zinc-500 focus:bg-white dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-100 dark:focus:border-zinc-400 dark:focus:bg-zinc-950"
+              />
+              <button
+                onClick={selectAllMatches}
+                disabled={matchedWordIds.length === 0}
+                title={t("transcript.selectAllMatches")}
+                className="flex h-7 cursor-pointer items-center rounded-lg px-2 text-xs text-zinc-500 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800"
+              >
+                {t("transcript.selectAllMatches")}
+              </button>
+              <button
+                onClick={removeAllMatches}
+                disabled={matchedWordIds.length === 0}
+                title={t("transcript.removeMatches")}
+                className="flex h-7 cursor-pointer items-center rounded-lg px-2 text-xs text-red-600 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40 dark:text-red-400 dark:hover:bg-red-950/40"
+              >
+                {t("transcript.removeMatches")}
+              </button>
+              {searchTokens.length > 0 && (
+                <span className="text-[10px] font-medium text-zinc-400 dark:text-zinc-500">
+                  {t("transcript.matchesCount", { count: matchedWordIds.length })}
+                </span>
+              )}
+            </div>
+          )}
           {deletedCount > 0 && (
             <span className="rounded-md bg-red-50 px-2 py-0.5 text-[9px] font-medium text-red-600 line-clamp-1 line-through dark:bg-red-950/40 dark:text-red-400">
               {t(

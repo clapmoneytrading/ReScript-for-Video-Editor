@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { NextConfig } from "next";
 
 // Telemetry reports which version is in use, so the client needs the version at
@@ -14,9 +15,13 @@ const { version } = JSON.parse(
 // itself in electron/main.ts). Both serve from the root, so there is no
 // basePath. The headers() below only covers `next dev`, where neither applies.
 const isExport = process.env.STATIC_EXPORT === "1";
+const projectRoot = fileURLToPath(new URL(".", import.meta.url));
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  turbopack: {
+    root: projectRoot,
+  },
   // Sentry stack traces are unreadable against a minified bundle. The source is
   // public anyway, so serving maps costs no secrecy and saves an upload step for
   // the web build — Sentry fetches them from app.getrescript.com on demand.
