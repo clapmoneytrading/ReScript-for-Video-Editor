@@ -99,6 +99,13 @@ interface PendingTranscript {
   speakers?: SpeakerInfo[];
 }
 
+/**
+ * Whether the <video>/<audio> element can decode the original file. When it
+ * can't (unsupported codec), the preview is re-encoded with ffmpeg and
+ * `mediaUrl` swapped to the result; export keeps using the original.
+ */
+export type PreviewStatus = "ok" | "unsupported" | "converting" | "converted" | "failed";
+
 interface EditorState {
   // Media
   videoFile: File | null;
@@ -106,6 +113,9 @@ interface EditorState {
   /** Whether the loaded file is video or audio-only. */
   mediaKind: MediaKind | null;
   duration: number;
+  previewStatus: PreviewStatus;
+  /** 0..1 while `previewStatus` is "converting". */
+  previewProgress: number;
   /**
    * Min/max envelope of the media's audio track, for the timeline waveform.
    *
@@ -192,6 +202,12 @@ interface EditorState {
   setTranscriptLanguage: (language: TranscriptLanguage) => void;
   setPendingTranscript: (t: PendingTranscript | null) => void;
   setDuration: (d: number) => void;
+  /** The media element rejected the source; a preview transcode is needed. */
+  markPreviewUnsupported: () => void;
+  setPreviewConverting: (progress: number) => void;
+  /** Swap the preview to a re-encoded blob (revokes the previous URL). */
+  setPreviewUrl: (url: string) => void;
+  setPreviewFailed: () => void;
   /**
    * Hand the decoded PCM to the store. Only the waveform envelope is retained;
    * the caller keeps ownership of the buffer itself (and transfers it to the
@@ -367,6 +383,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   mediaUrl: null,
   mediaKind: null,
   duration: 0,
+  previewStatus: "ok",
+  previewProgress: 0,
   waveform: null,
   hasAudio: false,
   source: "base",
@@ -418,6 +436,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       videoFile: file,
       mediaUrl: URL.createObjectURL(file),
       mediaKind: kind,
+      previewStatus: "ok",
+      previewProgress: 0,
       projectId: null,
       skipTranscription: Boolean(imported),
       source: imported ? "import" : isModelId(current) ? current : "base",
@@ -480,7 +500,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       videoFile: file,
       mediaUrl: URL.createObjectURL(file),
       mediaKind: record.mediaKind,
-      duration: record.duration,
+      previewStatus: "ok",
+      previewProgress: 0,
+      duration:
+        Number.isFinite(record.duration) && record.duration > 0 ? record.duration : 0,
       source: isTranscriptSource(record.source) ? record.source : "base",
       transcriptLanguage: isTranscriptLanguage(record.transcriptLanguage)
         ? record.transcriptLanguage
@@ -534,9 +557,22 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   },
   setPendingTranscript: (pendingTranscript) => set({ pendingTranscript }),
   setDuration: (duration) => {
+    // <video>.duration is NaN before metadata loads and Infinity for some blobs.
+    if (!Number.isFinite(duration) || duration <= 0) return;
     set({ duration });
     if (get().status === "ready") bumpAutosave();
   },
+  markPreviewUnsupported: () => {
+    if (get().previewStatus === "ok") set({ previewStatus: "unsupported" });
+  },
+  setPreviewConverting: (previewProgress) =>
+    set({ previewStatus: "converting", previewProgress }),
+  setPreviewUrl: (url) => {
+    const prev = get().mediaUrl;
+    if (prev) URL.revokeObjectURL(prev);
+    set({ mediaUrl: url, previewStatus: "converted", previewProgress: 1 });
+  },
+  setPreviewFailed: () => set({ previewStatus: "failed" }),
   setAudio: (audio) =>
     set({
       waveform: audio && audio.length > 0 ? buildWaveformPeaks(audio) : null,
@@ -1010,7 +1046,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       const cut = cutRangeAt(media.currentTime, cuts);
       if (cut) media.currentTime = cut.end + PLAYHEAD_EPSILON_S;
       if (media.currentTime >= media.duration - 0.05) media.currentTime = 0;
-      void media.play();
+      // Rejects with NotSupportedError while a preview transcode is pending.
+      media.play().catch(() => {});
     } else {
       media.pause();
     }
@@ -1034,6 +1071,8 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       mediaUrl: null,
       mediaKind: null,
       duration: 0,
+      previewStatus: "ok",
+      previewProgress: 0,
       waveform: null,
       hasAudio: false,
       source: loadModelPreference(),

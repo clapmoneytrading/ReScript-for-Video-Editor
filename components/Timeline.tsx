@@ -141,9 +141,10 @@ export default function Timeline() {
   const [hoveredSplitId, setHoveredSplitId] = useState<number | null>(null);
   const dark = useIsDark();
 
-  const fitPps = duration > 0 && width > 0 ? width / duration : 50;
+  const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
+  const fitPps = safeDuration > 0 && width > 0 ? width / safeDuration : 50;
   const pps = fitPps * zoom;
-  const totalWidth = Math.max(width, duration * pps);
+  const totalWidth = Math.max(width, safeDuration * pps);
   const ready = status === "ready" && duration > 0;
   // Clip delete is for a clip-body click (no word selection). Clicking a word
   // also selects its clip for trim handles — don't treat that as "delete clip".

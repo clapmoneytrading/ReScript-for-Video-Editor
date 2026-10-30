@@ -28,6 +28,7 @@ const runtimeMessageKeyList = [
   "error.simdUnsupported",
   "error.processFile",
   "error.extractAudio",
+  "error.previewTranscode",
   "error.nothingToExport",
   "error.videoExport",
   "error.audioExport",

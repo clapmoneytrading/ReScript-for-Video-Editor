@@ -16,6 +16,7 @@
   "main": "./electron-dist/main.js",
   "scripts": {
     "dev": "next dev",
+    "dev:webpack": "next dev --webpack",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
@@ -30,6 +31,8 @@
     "export:web": "cross-env STATIC_EXPORT=1 next build",
     "export:desktop": "cross-env STATIC_EXPORT=1 NEXT_PUBLIC_ELECTRON=1 next build",
     "dist": "npm run export:desktop && npm run build:electron && npm run fetch:ffmpeg && electron-builder --config.npmRebuild=false",
+    "dist:win": "npm run export:desktop && npm run build:electron && npm run fetch:ffmpeg && electron-builder --win nsis-web zip --x64 --config.npmRebuild=false && node scripts/package-win-offline.mjs",
+    "test:e2e": "playwright test",
     "release": "npm run export:desktop && npm run build:electron && npm run fetch:ffmpeg && electron-builder --publish always --config.npmRebuild=false",
     "cut:patch": "npm version patch -m \"Release v%s\" && git push --follow-tags",
     "cut:minor": "npm version minor -m \"Release v%s\" && git push --follow-tags",
@@ -60,6 +63,7 @@
   },
   "devDependencies": {
     "@ai-sdk/gateway": "^3.0.0",
+    "@playwright/test": "^1.64.1",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
@@ -90,8 +94,8 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "wassgha",
-        "repo": "rescript"
+        "owner": "clapmoneytrading",
+        "repo": "ReScript-for-Video-Editor"
       }
     ],
     "files": [
@@ -99,6 +103,7 @@
       "out/**/*",
       "package.json",
       "!electron-dist/**/*.map",
+      "!out/**/*.map",
       "!**/node_modules/**"
     ],
     "asar": true,

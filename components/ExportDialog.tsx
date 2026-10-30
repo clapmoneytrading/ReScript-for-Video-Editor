@@ -199,7 +199,13 @@ export default function ExportDialog() {
       : videoFormat === "webm"
         ? "webm"
         : "mp4";
-  const mediaFileName = `${baseName}.edited.${mediaExt}`;
+  const mediaFileName = `${baseName}-edited.${mediaExt}`;
+  const editedKindLabel = t(activeTab === "audio" ? "export.audio" : "export.video").toLowerCase();
+  const editedHint = t("export.downloadEditedHint", {
+    name: mediaFileName,
+    edited: formatTime(editedDuration),
+    original: formatTime(duration),
+  });
 
   const clearMediaExport = useCallback(() => {
     setExportResult(null);
@@ -746,11 +752,16 @@ export default function ExportDialog() {
               <a
                 href={exportResult.url}
                 download={mediaFileName}
-                className="flex h-10 items-center justify-center gap-2 rounded-xl bg-neutral-600 px-4 text-sm font-medium text-white transition hover:bg-neutral-500 dark:bg-neutral-500 dark:hover:bg-neutral-400"
+                data-download-edited
+                className="flex h-12 flex-col items-center justify-center gap-0.5 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white transition hover:bg-emerald-500 dark:bg-emerald-500 dark:hover:bg-emerald-400"
               >
-                <Download size={15} className="shrink-0" />
-                <span className="truncate">{t("export.downloadFile", { name: mediaFileName })}</span>
+                <span className="flex items-center gap-2">
+                  <Download size={15} className="shrink-0" />
+                  {t("export.downloadEdited", { kind: editedKindLabel })}
+                </span>
+                <span className="max-w-full truncate text-[11px] font-normal opacity-85">{mediaFileName}</span>
               </a>
+              <p className="text-center text-[11px] text-zinc-500 dark:text-zinc-400">{editedHint}</p>
               <button
                 onClick={startMediaExport}
                 className="h-10 rounded-xl text-sm font-medium text-zinc-500 transition hover:bg-zinc-50 dark:text-zinc-400 dark:hover:bg-zinc-800"
@@ -786,15 +797,18 @@ export default function ExportDialog() {
                 <button
                   onClick={saveFileExport}
                   disabled={saving}
-                  className="flex h-10 items-center justify-center gap-2 rounded-xl bg-neutral-600 px-4 text-sm font-medium text-white transition hover:bg-neutral-500 disabled:opacity-60 dark:bg-neutral-500 dark:hover:bg-neutral-400"
+                  data-download-edited
+                  className="flex h-12 w-full flex-col items-center justify-center gap-0.5 rounded-xl bg-emerald-600 px-4 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-60 dark:bg-emerald-500 dark:hover:bg-emerald-400"
                 >
-                  <Download size={15} className="shrink-0" />
-                  <span className="truncate">
-                    {saving
-                      ? t("export.saving")
-                      : t("export.saveFile", { name: mediaFileName })}
+                  <span className="flex items-center gap-2">
+                    <Download size={15} className="shrink-0" />
+                    {saving ? t("export.saving") : t("export.saveEdited", { kind: editedKindLabel })}
                   </span>
+                  <span className="max-w-full truncate text-[11px] font-normal opacity-85">{mediaFileName}</span>
                 </button>
+              )}
+              {!exportResult.savedName && (
+                <p className="text-center text-[11px] text-zinc-500 dark:text-zinc-400">{editedHint}</p>
               )}
               <button
                 onClick={startMediaExport}

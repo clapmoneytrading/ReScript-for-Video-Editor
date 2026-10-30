@@ -6,6 +6,7 @@ import { useEditorStore } from "@/lib/store";
 import { getCutRanges, isWordCutOut } from "@/lib/edits";
 import { getFFmpeg, releaseFFmpeg } from "@/lib/ffmpeg";
 import { activeMediaEngine, extractAudio } from "@/lib/mediaEngine";
+import { ensurePlayablePreview } from "@/lib/previewTranscode";
 import { VAD_SAMPLE_RATE } from "@/lib/vad";
 import { isNetworkError } from "@/lib/network";
 import { isElectron } from "@/lib/platform";
@@ -233,6 +234,15 @@ export default function Editor() {
           });
         });
         s.setAudio(audio);
+        // Streams the <video> element can't size (duration=Infinity) still have
+        // a known PCM length; use it so cuts/export have a real timeline.
+        if (audio && useEditorStore.getState().duration <= 0) {
+          s.setDuration(audio.length / VAD_SAMPLE_RATE);
+        }
+        // The <video> element usually reports an undecodable codec while the
+        // audio is still being extracted. Re-encode the preview now, while the
+        // wasm core is loaded, rather than paying a second init later.
+        await ensurePlayablePreview();
         // ffmpeg's gigabyte is pure overhead from here until the user exports,
         // and holding it through model instantiation is what makes WebKit kill
         // the tab. Export re-initialises it lazily from the HTTP cache. A no-op
@@ -260,6 +270,15 @@ export default function Editor() {
       }
     })();
   }, [videoFile, skipTranscription, transcribe]);
+
+  // The media element can also reject the source after the pipeline moved on
+  // (slow metadata probe). Outside the extraction stage ffmpeg is free, so run
+  // the transcode straight away; ensurePlayablePreview is a no-op otherwise.
+  const previewStatus = useEditorStore((s) => s.previewStatus);
+  useEffect(() => {
+    if (previewStatus !== "unsupported" || status === "preparing" || status === "idle") return;
+    void ensurePlayablePreview();
+  }, [previewStatus, status]);
 
   // The desktop shell opens as a small upload window and grows once the
   // three-pane editor takes over (and shrinks back on "start over").

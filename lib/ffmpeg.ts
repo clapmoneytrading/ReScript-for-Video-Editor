@@ -75,6 +75,11 @@ const EXEC_STALL_TIMEOUT_MS = 120_000;
 /** How long `ffmpeg.load` may take before we treat the core as wedged. */
 const LOAD_TIMEOUT_MS = 60_000;
 
+/** Inputs up to this size are rendered on the multi-threaded core first. */
+const MT_EXPORT_MAX_BYTES = 200 * 1024 * 1024;
+/** Liveness budget for the MT attempt — a trapped pthread should fall back fast. */
+const MT_EXEC_STALL_TIMEOUT_MS = 30_000;
+
 let ffmpegPromise: Promise<FFmpeg> | null = null;
 /** Which core `ffmpegPromise` resolved (or is resolving) to. */
 let loadedKind: FFmpegCoreKind | null = null;
@@ -89,12 +94,46 @@ export function coreAssetBase(kind: FFmpegCoreKind): string {
 }
 
 /**
- * Core used for video/audio export. Always the growable single-threaded build:
- * the multi-threaded 1 GiB ceiling is what made 1080p/original fail in the
- * desktop app (and hang before the PR #92 watchdog).
+ * Core used for video/audio export.
+ *
+ * Default is the growable single-threaded build: the multi-threaded 1 GiB
+ * ceiling is what made 1080p/original fail in the desktop app (and hang before
+ * the PR #92 watchdog). But ST means libx264 on one thread, which is painfully
+ * slow in the browser. For inputs up to {@link MT_EXPORT_MAX_BYTES} the fixed
+ * heap has room for input, output and encoder, so those try the MT core first
+ * (see {@link withExportCore}) and fall back to ST if it fails.
  */
-export function exportCoreKind(): FFmpegCoreKind {
-  return "st";
+export function exportCoreKind(file?: File): FFmpegCoreKind {
+  if (!file || file.size > MT_EXPORT_MAX_BYTES) return "st";
+  const cores = typeof navigator === "undefined" ? 1 : (navigator.hardwareConcurrency ?? 1);
+  return cores >= 2 ? "mt" : "st";
+}
+
+/**
+ * Run an export job on the fastest core that can hold it. An MT attempt that
+ * fails for any reason (heap, trap, stall) is retried once on the ST core.
+ */
+async function withExportCore(
+  file: File,
+  job: (ffmpeg: FFmpeg, input: string, stallTimeoutMs: number) => Promise<Blob>
+): Promise<Blob> {
+  if (exportCoreKind(file) === "mt") {
+    try {
+      const ffmpeg = await getFFmpeg("mt");
+      // getFFmpeg may have handed back an ST instance (MT failed to load, or
+      // ST was already resident); only treat it as the MT attempt if it is one.
+      if (loadedKind === "mt") {
+        const input = await ensureInput(ffmpeg, file);
+        return await job(ffmpeg, input, MT_EXEC_STALL_TIMEOUT_MS);
+      }
+    } catch (err) {
+      console.warn("Multi-threaded export failed; retrying single-threaded.", err);
+      await releaseFFmpeg();
+    }
+  }
+  const ffmpeg = await getFFmpeg("st");
+  const input = await ensureInput(ffmpeg, file);
+  return job(ffmpeg, input, EXEC_STALL_TIMEOUT_MS);
 }
 
 async function loadFFmpegInstance(kind: FFmpegCoreKind): Promise<FFmpeg> {
@@ -438,12 +477,10 @@ export async function exportVideo(
   if (keepRanges.length === 0) {
     throw new Error(en["error.nothingToExport"]);
   }
-  // Growable heap: the MT core's fixed 1 GiB is what failed 1080p/original
-  // exports (Discord: "ffmpeg not starting" in the desktop app; browser OK).
-  const ffmpeg = await getFFmpeg(exportCoreKind());
-  const input = await ensureInput(ffmpeg, file);
   const plan = buildVideoExport(keepRanges, { withAudio, format, resolution });
-  return renderPlan(ffmpeg, input, plan, editedDuration, onProgress, "error.videoExport");
+  return withExportCore(file, (ffmpeg, input, stall) =>
+    renderPlan(ffmpeg, input, plan, editedDuration, onProgress, "error.videoExport", stall)
+  );
 }
 
 /**
@@ -460,10 +497,75 @@ export async function exportAudio(
   if (keepRanges.length === 0) {
     throw new Error(en["error.nothingToExport"]);
   }
-  const ffmpeg = await getFFmpeg(exportCoreKind());
-  const input = await ensureInput(ffmpeg, file);
   const plan = buildAudioExport(keepRanges, { format });
-  return renderPlan(ffmpeg, input, plan, editedDuration, onProgress, "error.audioExport");
+  return withExportCore(file, (ffmpeg, input, stall) =>
+    renderPlan(ffmpeg, input, plan, editedDuration, onProgress, "error.audioExport", stall)
+  );
+}
+
+const DURATION_LOG_RE = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/;
+
+/**
+ * Re-encode `file` into something the browser's <video>/<audio> element can
+ * decode (H.264 + AAC in MP4, or AAC in M4A for audio-only). Used only for the
+ * preview when the original's codec is unsupported (e.g. VP9/Opus WebM in
+ * Safari, HEVC in Chrome). Export keeps using the original so quality is not
+ * lost. Capped at 720p and `ultrafast` so it finishes in reasonable time on
+ * the single-threaded wasm core.
+ */
+export async function transcodeForPreview(
+  file: File,
+  kind: "video" | "audio",
+  onProgress: (ratio: number) => void
+): Promise<Blob> {
+  return withExportCore(file, (ffmpeg, input, stall) =>
+    transcodeOn(ffmpeg, input, kind, onProgress, stall)
+  );
+}
+
+async function transcodeOn(
+  ffmpeg: FFmpeg,
+  input: string,
+  kind: "video" | "audio",
+  onProgress: (ratio: number) => void,
+  stallTimeoutMs: number
+): Promise<Blob> {
+  const out = kind === "video" ? "preview.mp4" : "preview.m4a";
+  const mime = kind === "video" ? "video/mp4" : "audio/mp4";
+  let totalSeconds = 0;
+  const logHandler = ({ message }: { type: string; message: string }) => {
+    if (totalSeconds > 0) return;
+    const m = DURATION_LOG_RE.exec(message);
+    if (m) totalSeconds = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+  };
+  const progressHandler = ({ time }: { progress: number; time: number }) => {
+    if (totalSeconds > 0) onProgress(progressRatio(time / 1e6, totalSeconds));
+  };
+  ffmpeg.on("log", logHandler);
+  ffmpeg.on("progress", progressHandler);
+  try {
+    const args =
+      kind === "video"
+        ? [
+            "-i", input,
+            "-vf", "scale=-2:'min(720,ih)'",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+            "-y", out,
+          ]
+        : ["-i", input, "-vn", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", "-y", out];
+    const code = await execWithWatchdog(ffmpeg, args, stallTimeoutMs);
+    if (code !== 0) throw new Error(en["error.previewTranscode"]);
+    const data = (await ffmpeg.readFile(out)) as Uint8Array;
+    await ffmpeg.deleteFile(out);
+    const buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+    return new Blob([buf as ArrayBuffer], { type: mime });
+  } finally {
+    ffmpeg.off("log", logHandler);
+    ffmpeg.off("progress", progressHandler);
+  }
 }
 
 /** Run an export plan to completion and read the result back out of MEMFS. */
@@ -473,7 +575,8 @@ async function renderPlan(
   plan: ExportPlan,
   editedDuration: number,
   onProgress: (ratio: number) => void,
-  failureKey: "error.videoExport" | "error.audioExport"
+  failureKey: "error.videoExport" | "error.audioExport",
+  stallTimeoutMs: number = EXEC_STALL_TIMEOUT_MS
 ): Promise<Blob> {
   const out = `output.${plan.ext}`;
   const progressHandler = ({ time }: { progress: number; time: number }) => {
@@ -482,13 +585,17 @@ async function renderPlan(
   };
   ffmpeg.on("progress", progressHandler);
   try {
-    const code = await execWithWatchdog(ffmpeg, [
-      "-i", input,
-      "-filter_complex", plan.filter,
-      ...plan.streamArgs,
-      ...plan.codecArgs,
-      "-y", out,
-    ]);
+    const code = await execWithWatchdog(
+      ffmpeg,
+      [
+        "-i", input,
+        "-filter_complex", plan.filter,
+        ...plan.streamArgs,
+        ...plan.codecArgs,
+        "-y", out,
+      ],
+      stallTimeoutMs
+    );
     if (code !== 0) throw new Error(en[failureKey]);
     const data = (await ffmpeg.readFile(out)) as Uint8Array;
     await ffmpeg.deleteFile(out);
